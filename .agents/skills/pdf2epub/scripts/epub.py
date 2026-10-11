@@ -368,7 +368,14 @@ def guard(orig, new, ocr=False):
     if orig.strip() and not new.strip():
         # Şekil sayfasının tamamı gürültüyse boşaltmak doğrudur. Başlık ya da resim satırı varsa bu kayıptır.
         blocks = [b.strip() for b in orig.split("\n\n") if b.strip()]
-        return prose_chars(orig) == 0 and not any(b.startswith(("#", "![](")) for b in blocks)
+        if any(b.startswith(("#", "![](")) for b in blocks):
+            return False
+        if prose_chars(orig) == 0:
+            return True
+        if not ocr:
+            return False
+        # Taranmış sayfada taslak gürültülüdür: tesseract bir çizimin karalamasını "kelime" sayar, o yüzden
+        # prose_chars burada yanıltır (ölçüm: 0009'da 79). Boşaltma kararını aşağıdaki gürültü payı verir.
     if len(orig) < 50:
         return True
     if abs(len(new) - len(orig)) <= max(50, 0.15 * len(orig)):
@@ -841,6 +848,14 @@ def selftest():
     # yalnız gürültüden oluşan sayfa boşaltılabilir, kısa gürültü bloğuyla birlikte
     assert guard(G, "")
     assert prose_chars(G) == 0
+    # Taranmış sayfada tesseract bir çizimin karalamasını "kelime" sayar: prose_chars yanıltır.
+    # Boşaltma kararı yine gürültü payına bakar, boş dala takılıp kesilmez (ölçüm: Behrengi 0009).
+    N = "\n\n".join(["İN SE, EKA kt", "2 Y", "2“ ii & i", "İğ TT. aç NS ar i s—- A , NF sel KS? hş Fal",
+                     "ŞEF Sl . i A j \"€ Ni «© £ BERİ Si VE", "0S i"])
+    assert prose_chars(N) > 0 and prose_chars(N) + 150 >= len(N)
+    assert not guard(N, "")                          # metin katmanlı sayfa: gürültü olsa da boşaltma yok
+    assert guard(N, "", ocr=True)                    # taranmış sayfa: gürültü payı yeter, boşaltma serbest
+    assert not guard("kelime " * 60, "", ocr=True)   # taranmış olsa da gerçek metin boşaltılamaz
     # sayfa 0080 gibi dağınık tablo satırları tabloya çevrilince metin uzar ama kayıp olmaz
     S = "\n\n".join(["Yük Baryon Acayiplik Enerji Açısal", "No momentum Korunur",
                      "(yerel olarak) Evet Evet Hemen hemen Evet Evet",

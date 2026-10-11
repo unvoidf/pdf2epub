@@ -40,6 +40,7 @@ Rules:
 - Look at the last line of the page in the image. If the image shows no hyphen there and the text file has one, delete the hyphen. If the image shows a hyphen that the text file has lost, add it.
 - The script removes the running header and the page number. Do not add them. Delete a line at the top or the bottom of the page only when the image shows the same line on the page before. Keep a chapter title.
 - A word inside a picture, a drawing, or a diagram is not part of the text. Delete it. The image shows you where it is.
+- If the whole page is one picture and every line in the text file is noise, delete every line. An empty file is the right result for a page that shows no text.
 - If the text file is empty, write the text that the image shows. If the image shows no text, do not change the file.
 - Do not change a page that is correct.
 - Do not read other files. Do not run commands.
