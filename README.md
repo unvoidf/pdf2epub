@@ -23,7 +23,7 @@
 5. Ajana kitabın yolunu ver:
 
    ```
-   "C:\kitaplar\Kitap Adı - Yazar Adı.pdf" dosyasını epub'a çevir
+   pdf2epub skill'ini kullanarak "C:\kitaplar\Kitap Adı - Yazar Adı.pdf" dosyasını epub'a çevir
    ```
 
 Gerisini ajan halleder. Gereken araçlar eksikse (Python 3.10 veya üstü, PyMuPDF, pandoc, taranmış PDF için Tesseract) ajan söyler ve kurar.
