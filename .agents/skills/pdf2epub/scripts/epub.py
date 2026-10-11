@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import html
 import os
 import shutil
@@ -170,6 +171,23 @@ def page_blocks(lines, body_size, left, cont=True, headings=True):
     return out
 
 
+def pdf_digest(pdf):
+    # Damgaya yazılan içerik imzası: dosya adı ve sayfa sayısı aynı olan başka bir kitap
+    # sessizce atlanmasın. Parça parça okunur, bütün dosya belleğe alınmaz.
+    h = hashlib.sha256()
+    with open(pdf, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
+def is_scanned(lines, page):
+    # Bir sayfanın kullanılabilir metin katmanı yoktur: ya hiç metin satırı yoktur, ya da
+    # görüntü taşır ve metni çok kısadır. Kısa metinli ama görüntüsüz bir sayfa metin
+    # sayfasıdır (ör. yalnız amblem adı yazan sayfa): başlık işareti alabilmeli.
+    return sum(len(l["text"]) for l in lines) < SCAN_CHARS and (bool(page.get_images()) or not lines)
+
+
 def extract(pdf, force=False):
     try:
         import fitz
@@ -185,10 +203,15 @@ def extract(pdf, force=False):
     if doc.needs_pass:
         raise SystemExit(f"{pdf} needs a password.")
     if (work / "extract.ok").exists() and not force:
-        stamp = (work / "extract.ok").read_text(encoding="utf-8").strip()
-        # Eski klasörde damga boştur: o zaman eski davranış sürer
-        if stamp and stamp != str(doc.page_count):
-            raise SystemExit(f"The work folder holds the pages of another book ({stamp} pages, this PDF has {doc.page_count}). Run extract with --force.")
+        parts = (work / "extract.ok").read_text(encoding="utf-8").strip().split()
+        # Damga: "sayfa_sayısı içerik_imzası". Eski klasörde yalnız sayfa sayısı yazar (tek alan):
+        # o zaman eski davranış sürer. İmza, adı ve sayfa sayısı aynı olan başka bir dosyanın
+        # sessizce atlanmasını önler.
+        if parts:
+            if parts[0] != str(doc.page_count):
+                raise SystemExit(f"The work folder holds the pages of another book ({parts[0]} pages, this PDF has {doc.page_count}). Run extract with --force.")
+            if len(parts) > 1 and parts[1] != pdf_digest(pdf):
+                raise SystemExit(f"The work folder holds the pages of another file with {doc.page_count} pages. Run extract with --force.")
         return work, None, None, None
     if force:
         # Damgayı ilk iş sil: --force yarıda kalırsa klasör geçerli sayılmasın, bir sonraki extract baştan çalışsın.
@@ -198,6 +221,9 @@ def extract(pdf, force=False):
     shutil.rmtree(pending, ignore_errors=True)
     pages, todo, scan, blank, size_chars = {}, set(), set(), [], Counter()
     for n, page in enumerate(doc, 1):
+        # Uzun tarama sessiz kalmasın: ilerleme stderr'e yazılır, stdout sözleşmesi bozulmaz.
+        if n % 25 == 0:
+            print(f"  reading {n}/{doc.page_count}", file=sys.stderr, flush=True)
         lines = []
         for b in page.get_text("rawdict")["blocks"]:
             for ln in b.get("lines", []):
@@ -222,7 +248,7 @@ def extract(pdf, force=False):
             # metin yok, resim yok, çizim yok: sayfa boş. Kitaba girmez, ama sessizce kaybolmasın.
             blank.append(f"{n:04d}")
             continue
-        if sum(len(l["text"]) for l in lines) < SCAN_CHARS:
+        if is_scanned(lines, page):
             # Metin katmanı yok: sayfa taranmıştır. Tesseract taslağı yazar, işçi resimden düzeltir.
             # Sayfa 300 dpi çizilir ve diske yazılır: bütün kitabın PNG'sini bellekte tutmak büyük
             # taramada bellek şişirir. OCR dosyayı okuyup yine stdin'den verir.
@@ -242,6 +268,7 @@ def extract(pdf, force=False):
                 raise SystemExit(f"{len(todo)} pages have no text layer. Run the check command for the OCR program.")
             failed = sorted(todo)
         else:
+            print(f"  ocr: {len(todo)} pages", file=sys.stderr, flush=True)
             with ThreadPoolExecutor(OCR_WORKERS) as pool:
                 out = list(pool.map(lambda n: ocr_tsv(pending / f"{n:04d}.png", tess), todo))
             failed = [n for n, tsv in zip(todo, out) if tsv is None]
@@ -266,7 +293,9 @@ def extract(pdf, force=False):
     nums = list(pages)
     stripped = strip_running([pages[n] for n in nums], body_size)
     ended_short = True   # ilk sayfanın öncesi yoktur: ilk sayfa paragraf devamı olamaz
-    for n, lines in zip(nums, stripped):
+    for k, (n, lines) in enumerate(zip(nums, stripped), 1):
+        if k % 25 == 0:
+            print(f"  writing {k}/{len(nums)}", file=sys.stderr, flush=True)
         page = doc[n - 1]
         # 10th percentile, not the mode: pages of short indented dialogue have an indented mode
         x0s = sorted(l["x0"] for l in lines)
@@ -293,7 +322,7 @@ def extract(pdf, force=False):
     shutil.rmtree(pending, ignore_errors=True)
     # Hangi sayfaların metin katmanı yoktu: build benzerlik kuralını yalnız metin katmanlı sayfalara uygular
     (work / "scan.txt").write_text("".join(f"{n:04d}\n" for n in sorted(scan)), encoding="utf-8")
-    (work / "extract.ok").write_text(str(doc.page_count), encoding="utf-8")   # damga: başka kitabın sayfaları kalmasın
+    (work / "extract.ok").write_text(f"{doc.page_count} {pdf_digest(pdf)}", encoding="utf-8")   # damga: başka kitabın sayfaları kalmasın
     return work, scan, failed, blank
 
 
@@ -332,6 +361,10 @@ def similar(a, b):
 def guard(orig, new, ocr=False):
     if new is None:
         return False
+    if new == orig:
+        # Değişmemiş sayfa: benzerlik hesabı gereksiz. Ölçüm: gerçek kitap sayfasında ~124 ms,
+        # 400 sayfalık kitapta ~50 sn (çok tekrarlı metinde daha da fazla).
+        return True
     if orig.strip() and not new.strip():
         # Şekil sayfasının tamamı gürültüyse boşaltmak doğrudur. Başlık ya da resim satırı varsa bu kayıptır.
         blocks = [b.strip() for b in orig.split("\n\n") if b.strip()]
@@ -363,8 +396,9 @@ DROP_ROLES = {"back-cover", "ads", "flap"}   # bu roller kitabın metni değildi
 
 def parse_roles(text):
     # roles.txt: her satırda dört haneli sayfa numarası ve rol ("0002 back-cover")
+    # Baştaki BOM kırpılır: Windows araçları dosyayı imzayla yazar ve ilk satır sessizce düşerdi.
     roles = {}
-    for line in text.splitlines():
+    for line in text.removeprefix("\ufeff").splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2 and re.fullmatch(r"\d{4}", parts[0]):
             roles[parts[0]] = parts[1].strip().lower()
@@ -392,8 +426,9 @@ def is_table(b):
 def parse_chapters(text):
     # chapters.txt: her satırda dört haneli sayfa numarası ve başlığın kendisi ("0005 I. Bölüm").
     # Aynı sayfada birden çok başlık seçilebilir. Boş dosya geçerlidir: kitapta başlık yok demektir.
+    # Baştaki BOM kırpılır: Windows araçları dosyayı imzayla yazar ve ilk bölüm sessizce düşerdi.
     chapters = {}
-    for line in text.splitlines():
+    for line in text.removeprefix("\ufeff").splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2 and re.fullmatch(r"\d{4}", parts[0]):
             chapters.setdefault(parts[0], []).append(parts[1].strip())
@@ -487,7 +522,8 @@ def build(pdf, title, author):
     if not pandoc:
         raise SystemExit("pandoc is missing. Run the check command.")
     roles = parse_roles((work / "roles.txt").read_text(encoding="utf-8")) if (work / "roles.txt").exists() else {}
-    # scan.txt yoksa (eski çalışma klasörü) taranmış sayfalar bilinmez: benzerlik kuralı hiç uygulanmaz.
+    # scan.txt yoksa (eski çalışma klasörü) hangi sayfanın taranmış olduğu bilinmez. O zaman benzerlik
+    # kuralı uygulanmaz: bilinmeyen bir taranmış sayfaya uygulamak işçinin meşru düzeltmesini geri alırdı.
     scan = set((work / "scan.txt").read_text(encoding="utf-8").split()) if (work / "scan.txt").exists() else None
     drop = set(drop_pages(roles))
     cover = next((f"{n}.png" for n in sorted(roles) if roles[n].rstrip("?").strip() == "cover" and (work / f"{n}.png").exists()), None)
@@ -503,7 +539,7 @@ def build(pdf, title, author):
             continue
         o = orig.read_text(encoding="utf-8")
         n = md.read_text(encoding="utf-8") if md.exists() else None
-        if not guard(o, n, ocr=scan is not None and md.stem in scan):
+        if not guard(o, n, ocr=scan is None or md.stem in scan):
             # işçinin sürümü kaybolmasın: geri almadan önce sakla, yoksa ne yaptığı görülemez
             if n is not None:
                 md.with_suffix(".md.rejected").write_text(n, encoding="utf-8")
@@ -704,6 +740,9 @@ def check():
 
 
 def selftest():
+    if not __debug__:
+        # -O ile assert'ler soyulur: test hiç koşmaz, ama "selftest ok" yazardı. Sessizce geçmesin.
+        raise SystemExit("The selftest needs assertions. Do not run it with -O.")
     L = lambda t, x=50, s=10: {"text": t, "x0": x, "size": s}
     T = lambda pages: [[l["text"] for l in pg] for pg in pages]
     C = lambda t, w=5: [(c, i * w, (i + 1) * w) for i, c in enumerate(t)]
@@ -747,6 +786,14 @@ def selftest():
     assert page_blocks([L("BİRİNCİ BÖLÜM", x=80, s=14), L("İlk cümle"), L("sürer.")], 10, 50) ==         ["# BİRİNCİ BÖLÜM", "İlk cümle sürer."]
     assert page_blocks([L("Girintili başlar", x=62), L("sürer.")], 10, 50) == ["Girintili başlar sürer."]
     assert page_blocks([], 10, 50) == []
+    # taranmış sayfa kararı: kısa metinli ama görüntüsüz sayfa metin sayfasıdır (başlık işareti alabilir)
+    PG = lambda imgs: type("PG", (), {"get_images": lambda self: imgs})()
+    assert not is_scanned([L("ÖTÜKEN")], PG([]))        # amblem sayfası: metin katmanı var, taranmış değil
+    assert is_scanned([L("x")], PG([1]))                # görüntü + kısa metin: taranmış
+    assert is_scanned([], PG([1]))                      # hiç metin satırı yok
+    assert is_scanned([], PG([]))                       # yalnız çizim: metin yok
+    assert not is_scanned([L("uzun metin " * 10)], PG([1]))
+    assert not is_scanned([L("uzun metin " * 10)], PG([]))
     # kısa satır paragrafı bitirir (girintisiz kitaplar)
     K = lambda t, x1: {**L(t), "x1": x1}
     assert page_blocks([K("tam satır", 200), K("kısa.", 90), K("Yeni", 200), K("sürer.", 120)], 10, 50) ==         ["<<", "tam satır kısa.", "Yeni sürer."]
@@ -843,6 +890,8 @@ def selftest():
     # yapı geçişi: rol dosyası ve güvenli düşürme
     R = parse_roles("0001 cover\n0002 back-cover\n0007 blank?\n0010 body\n0254 body\n0257 ads\nbozuk satır\n")
     assert len(R) == 6 and R["0002"] == "back-cover" and R["0007"] == "blank?"
+    # baştaki BOM ilk satırı düşürmesin (Windows araçları dosyayı imzayla yazabilir)
+    assert parse_roles("\ufeff0001 cover\n0002 body\n") == {"0001": "cover", "0002": "body"}
     assert drop_pages(R) == ["0002", "0257"]                                  # gövdenin dışı
     assert drop_pages(parse_roles("0001 cover\n0002 back-cover\n")) == []     # gövde yok: hiçbiri düşmez
     assert drop_pages(parse_roles("0005 body\n0007 ads\n0010 body\n")) == []  # gövdenin içi: dokunulmaz
@@ -851,6 +900,8 @@ def selftest():
     C = parse_chapters("0005 I. Bölüm\n0007 II. Bölüm\n0010 I. Bölüm\n0010 II. Bölüm\nbozuk satır\n")
     assert C == {"0005": ["I. Bölüm"], "0007": ["II. Bölüm"], "0010": ["I. Bölüm", "II. Bölüm"]}
     assert parse_chapters("") == {}                     # boş dosya: kitapta başlık yok
+    assert parse_chapters("\ufeff0005 I. Bölüm\n0007 II. Bölüm\n") == \
+        {"0005": ["I. Bölüm"], "0007": ["II. Bölüm"]}   # BOM ilk bölümü düşürmesin
     assert demote("# I. Bölüm\n\nmetin\n\n# MODERN KLASİKLER Dizisi - 164", {"I. Bölüm"}) == \
         ("# I. Bölüm\n\nmetin\n\nMODERN KLASİKLER Dizisi - 164", [])
     assert demote("# I. Bölüm\n\nmetin", {"Yok"}) == ("I. Bölüm\n\nmetin", ["Yok"])   # eşleşmeyen seçim bildirilir

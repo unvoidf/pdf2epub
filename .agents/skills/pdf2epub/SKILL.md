@@ -31,6 +31,7 @@ Do all eight steps. Step 4 is not optional: without it, the EPUB keeps the error
 1. Find the PDF path in the request. Get the title and the author from the request, or from the file name. Omit `--author` when the request and the file name give no author.
 2. Run: `python "SKILL_DIR/scripts/epub.py" extract "<pdf>"`
    The output always holds `work:`, `pages:` and `batches:`. Each batch is a page range such as `0001-0010`. It holds `scan:` only when the PDF has pages with no text layer, and `ocr failed:` only when the OCR program fails or is not installed.
+   The script writes its progress to the error stream. A line that starts with two spaces is progress, not a result.
    - `scan: N` means that N pages have no text layer. The script read those pages with the OCR program and wrote a draft. The subagents correct the draft from the page image.
    - `ocr failed: ...` means that the text file of those pages is empty. The subagents write those pages from the image.
    A second `extract` on a book that is already converted does no work. Add `--force` when the user asks to convert the book again from the start. The script then deletes every file of the last conversion in the work folder.
