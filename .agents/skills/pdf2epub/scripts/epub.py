@@ -17,6 +17,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 DPI = 150
 SCAN_DPI = 300    # taranmış sayfa: metin katmanı yok, OCR ve işçi bu görüntüyü kullanır
+COVER_LONG_EDGE = 1680   # kapak okuma ekranına göre çizilir: 7 inç 300 ppi ekranın uzun kenarı
+COVER_QUALITY = 80       # kapak JPEG kalitesi: ölçümde 6-7 inç e-mürekkep ekranda fark üretmiyor
 SCAN_CHARS = 20   # bir sayfanın metin katmanı bundan kısaysa sayfa taranmıştır
 OCR_LANG = "tur"
 OCR_WORKERS = 4
@@ -283,7 +285,7 @@ def extract(pdf, force=False):
     if force:
         # every check passed: clear every file extract writes, so no stale page stays.
         # (the stamp went first, at the top of extract, so a half-done run is never taken for valid)
-        for pat in ("[0-9]*.png", "[0-9]*.md", "[0-9]*.md.orig", "[0-9]*.md.rejected", "img-*.png", "book.html", "roles.txt", "scan.txt", "toc.txt", "chapters.txt"):
+        for pat in ("[0-9]*.png", "[0-9]*.md", "[0-9]*.md.orig", "[0-9]*.md.rejected", "img-*.png", "cover.jpg", "book.html", "roles.txt", "scan.txt", "toc.txt", "chapters.txt"):
             for f in work.glob(pat):
                 try:
                     f.unlink()
@@ -521,6 +523,34 @@ def to_html(pages):
     return "\n".join(out)
 
 
+def cover_dpi(long_pt):
+    # Kapağın uzun kenarını COVER_LONG_EDGE piksele getiren çizim yoğunluğu. Taranmış sayfanın
+    # yoğunluğunu geçmez: küçük bir sayfayı hedefe şişirmek yalnız bayt harcar, ayrıntı eklemez.
+    # Tam sayı döner: PyMuPDF dpi olarak float kabul etmez.
+    if long_pt <= 0:
+        return DPI
+    return min(SCAN_DPI, round(COVER_LONG_EDGE * 72 / long_pt))
+
+
+def cover_image(pdf, work, name):
+    # Kapağı hedef çözünürlükte yeniden çiz ve JPEG yaz. Ham sayfa PNG'si kayıpsızdır ve okuma
+    # ekranının gösterdiğinden çok daha büyüktür; kapak EPUB'un tek resmi olduğu için dosya
+    # boyutunun tamamını o belirler. Yeniden çizmek kayıp değildir: sayfa vektör metni de taşır,
+    # PDF'in gömülü resmini kullanmak ise yanlıştır (o resim sayfanın yalnız bir katmanıdır).
+    # Dönen ad pandoc'a verilir; çizilemezse None döner ve çağıran ham PNG'ye düşer.
+    import fitz
+    try:
+        n = int(name.split(".")[0])
+        with fitz.open(pdf) as doc:
+            page = doc[n - 1]
+            dpi = cover_dpi(max(page.rect.width, page.rect.height))
+            page.get_pixmap(dpi=dpi, colorspace=fitz.csRGB).save(str(work / "cover.jpg"), "jpeg", jpg_quality=COVER_QUALITY)
+    except Exception:
+        # Eksik sayfa, bozuk resim, kilitli dosya: kapak yüzünden kitap hiç üretilmesin olmaz.
+        return None
+    return "cover.jpg"
+
+
 def build(pdf, title, author):
     work = pdf.with_suffix(".pdf2epub")
     if not (work / "extract.ok").exists():
@@ -534,6 +564,9 @@ def build(pdf, title, author):
     scan = set((work / "scan.txt").read_text(encoding="utf-8").split()) if (work / "scan.txt").exists() else None
     drop = set(drop_pages(roles))
     cover = next((f"{n}.png" for n in sorted(roles) if roles[n].rstrip("?").strip() == "cover" and (work / f"{n}.png").exists()), None)
+    # Kapak EPUB'un tek resmidir: boyutun tamamını o belirler. Onu okuma ekranının çözünürlüğünde
+    # bir JPEG olarak yeniden üret (ölçüm: EPUB 4–10× küçülür, ekranda görünür fark yok). Çizilemezse PNG kalır.
+    cover = (cover_image(pdf, work, cover) or cover) if cover else None
     # chapters.txt: toc ajanının seçtiği başlıklar. Dosya varsa yalnız o başlıklar başlık kalır, sayfadaki
     # öteki "# " blokları paragrafa iner. Dosya yoksa ajan çalışmamıştır: her "# " bloğu başlık kalır.
     chapters = parse_chapters((work / "chapters.txt").read_text(encoding="utf-8")) if (work / "chapters.txt").exists() else None
@@ -911,6 +944,11 @@ def selftest():
     assert drop_pages(parse_roles("0001 cover\n0002 back-cover\n")) == []     # gövde yok: hiçbiri düşmez
     assert drop_pages(parse_roles("0005 body\n0007 ads\n0010 body\n")) == []  # gövdenin içi: dokunulmaz
     assert drop_pages(parse_roles("0010 body\n0257 ads?\n")) == []            # emin değil: dokunulmaz
+    # Kapak hedefi: uzun kenar COVER_LONG_EDGE piksel. Yoğunluk sayfa boyuna göre hesaplanır.
+    assert cover_dpi(72 * 8) == 210                 # 8 inçlik sayfa: 1680/8
+    assert cover_dpi(72 * 11) == 153                # 11 inçlik sayfa: 1680/11
+    assert cover_dpi(72 * 4) == SCAN_DPI            # 4 inçlik sayfa: hedef 420 dpi, tavan 300
+    assert cover_dpi(0) == DPI                      # bozuk ölçü: güvenli varsayılan
     # TOC: chapters.txt yalnız seçilmiş başlıkları bırakır, sayfadaki öteki "# " blokları paragrafa iner
     C = parse_chapters("0005 I. Bölüm\n0007 II. Bölüm\n0010 I. Bölüm\n0010 II. Bölüm\nbozuk satır\n")
     assert C == {"0005": ["I. Bölüm"], "0007": ["II. Bölüm"], "0010": ["I. Bölüm", "II. Bölüm"]}
