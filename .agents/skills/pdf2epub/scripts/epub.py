@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,15 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 
 def fix_tr(s):
     return s.translate(TR_FIX)
+
+
+def nfc(s):
+    # Metni NFC'ye normalize et: birleşik ve ayrışık yazım tek biçime iner. Kanonik eşdeğerliktir,
+    # harfleri değiştirmez. Kaynak PDF bazı harfleri ayrışık verir (u + U+0308), bazılarını birleşik
+    # (ç, ş); öyle kalırsa okuyucuda arama ve kopyalama tutarsız olur. Sayfa metnini yazan ve okuyan
+    # her yer bu işlevden geçer. Geçmezse chapters.txt ile sayfa başlığı farklı biçimde olur ve
+    # demote eşleşmeyi kaçırır: başlık sessizce paragrafa iner.
+    return unicodedata.normalize("NFC", s)
 
 
 def line_text(chars):
@@ -319,8 +329,9 @@ def extract(pdf, force=False):
             os.replace(pending / f"{n:04d}.png", work / f"{n:04d}.png")
         else:
             page.get_pixmap(dpi=DPI).save(work / f"{n:04d}.png")
+        page_text = nfc("\n\n".join(blocks))
         for ext in (".md", ".md.orig"):
-            (work / f"{n:04d}{ext}").write_text("\n\n".join(blocks), encoding="utf-8")
+            (work / f"{n:04d}{ext}").write_text(page_text, encoding="utf-8")
     shutil.rmtree(pending, ignore_errors=True)
     # Hangi sayfaların metin katmanı yoktu: build benzerlik kuralını yalnız metin katmanlı sayfalara uygular
     (work / "scan.txt").write_text("".join(f"{n:04d}\n" for n in sorted(scan)), encoding="utf-8")
@@ -436,8 +447,10 @@ def parse_chapters(text):
     # chapters.txt: her satırda dört haneli sayfa numarası ve başlığın kendisi ("0005 I. Bölüm").
     # Aynı sayfada birden çok başlık seçilebilir. Boş dosya geçerlidir: kitapta başlık yok demektir.
     # Baştaki BOM kırpılır: Windows araçları dosyayı imzayla yazar ve ilk bölüm sessizce düşerdi.
+    # Metin NFC'ye normalize edilir: sayfa başlığı da NFC olduğu için ayrışık yazılmış bir seçim
+    # eşleşmeyi kaçırmaz.
     chapters = {}
-    for line in text.removeprefix("\ufeff").splitlines():
+    for line in nfc(text).removeprefix("\ufeff").splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2 and re.fullmatch(r"\d{4}", parts[0]):
             chapters.setdefault(parts[0], []).append(parts[1].strip())
@@ -606,8 +619,8 @@ def build(pdf, title, author):
         if md.stem in drop:
             dropped.append(md.stem)
             continue
-        o = orig.read_text(encoding="utf-8")
-        n = md.read_text(encoding="utf-8") if md.exists() else None
+        o = nfc(orig.read_text(encoding="utf-8"))
+        n = nfc(md.read_text(encoding="utf-8")) if md.exists() else None
         if not guard(o, n, ocr=scan is None or md.stem in scan):
             # işçinin sürümü kaybolmasın: geri almadan önce sakla, yoksa ne yaptığı görülemez
             if n is not None:
@@ -671,7 +684,7 @@ def toc_candidates(work, roles, title, author):
         if md.stem in drop:
             continue
         src = md if md.exists() else orig
-        text = src.read_text(encoding="utf-8")
+        text = nfc(src.read_text(encoding="utf-8"))
         for b in (x.strip() for x in re.split(r"\n\s*\n", text)):
             m = HEAD.match(b)
             if m and "\n" not in b:
@@ -997,6 +1010,12 @@ def selftest():
     assert parse_chapters("") == {}                     # boş dosya: kitapta başlık yok
     assert parse_chapters("\ufeff0005 I. Bölüm\n0007 II. Bölüm\n") == \
         {"0005": ["I. Bölüm"], "0007": ["II. Bölüm"]}   # BOM ilk bölümü düşürmesin
+    # Ayrışık ve birleşik yazım tek biçime iner: başlık seçimi eşleşmeyi kaçırmaz.
+    assert nfc("gu\u0308zel") == "güzel"                 # u + birleştirici çift nokta -> ü
+    assert nfc("O\u0308bu\u0308ru\u0308") == "Öbürü"
+    assert nfc("zaten birleşik") == "zaten birleşik"      # NFC girdi değişmez
+    assert parse_chapters("0005 gu\u0308zel\n") == {"0005": ["güzel"]}
+    assert demote(nfc("# gu\u0308zel\n\nmetin"), {"güzel"})[0] == "# güzel\n\nmetin"
     assert demote("# I. Bölüm\n\nmetin\n\n# MODERN KLASİKLER Dizisi - 164", {"I. Bölüm"}) == \
         ("# I. Bölüm\n\nmetin\n\nMODERN KLASİKLER Dizisi - 164", [])
     assert demote("# I. Bölüm\n\nmetin", {"Yok"}) == ("I. Bölüm\n\nmetin", ["Yok"])   # eşleşmeyen seçim bildirilir
