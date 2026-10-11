@@ -523,13 +523,42 @@ def to_html(pages):
     return "\n".join(out)
 
 
-def cover_dpi(long_pt):
+def bitmap_dpi(images, has_ink):
+    # images: [(piksel_gen, piksel_yük, kutu_gen_pt, kutu_yük_pt)]. has_ink: sayfada metin ya da
+    # vektör çizim var mı. Sayfa yalnız resimlerden oluşuyorsa en keskin resmin sayfadaki
+    # yoğunluğunu döner. Metin/vektör varsa None: onlar çözünürlükten bağımsızdır, sınır koymak
+    # yazıyı bulanıklaştırır. Resim de yoksa None.
+    if has_ink:
+        return None
+    best = 0.0
+    for px_w, px_h, box_w, box_h in images:
+        if box_w > 0 and box_h > 0:
+            best = max(best, px_w * 72 / box_w, px_h * 72 / box_h)
+    return best or None
+
+
+def source_dpi(page):
+    # Kapak sayfasının kendi içeriğinin çözünürlüğü. Metin ve vektör çizim çözünürlükten bağımsız
+    # olduğu için onlar varsa sınır yoktur (None).
+    has_ink = bool(page.get_text().strip()) or bool(page.get_drawings())
+    images = [(im["width"], im["height"], im["bbox"][2] - im["bbox"][0], im["bbox"][3] - im["bbox"][1])
+              for im in page.get_image_info()]
+    return bitmap_dpi(images, has_ink)
+
+
+def cover_dpi(long_pt, native_dpi=None):
     # Kapağın uzun kenarını COVER_LONG_EDGE piksele getiren çizim yoğunluğu. Taranmış sayfanın
     # yoğunluğunu geçmez: küçük bir sayfayı hedefe şişirmek yalnız bayt harcar, ayrıntı eklemez.
+    # native_dpi: sayfa tek bir bitmap ise o resmin yoğunluğu. Kaynağın üstüne çıkmak ayrıntı
+    # eklemez, yalnız dosyayı büyütür: kapak EPUB'un tek resmidir, boyutun tamamını o belirler.
+    # None: metin/vektör var ya da bilinmiyor; o zaman sınır yalnız tavan ve hedeftir.
     # Tam sayı döner: PyMuPDF dpi olarak float kabul etmez.
     if long_pt <= 0:
         return DPI
-    return min(SCAN_DPI, round(COVER_LONG_EDGE * 72 / long_pt))
+    dpi = min(SCAN_DPI, round(COVER_LONG_EDGE * 72 / long_pt))
+    if native_dpi:
+        dpi = min(dpi, max(1, round(native_dpi)))
+    return dpi
 
 
 def cover_image(pdf, work, name):
@@ -543,7 +572,7 @@ def cover_image(pdf, work, name):
         n = int(name.split(".")[0])
         with fitz.open(pdf) as doc:
             page = doc[n - 1]
-            dpi = cover_dpi(max(page.rect.width, page.rect.height))
+            dpi = cover_dpi(max(page.rect.width, page.rect.height), source_dpi(page))
             page.get_pixmap(dpi=dpi, colorspace=fitz.csRGB).save(str(work / "cover.jpg"), "jpeg", jpg_quality=COVER_QUALITY)
     except Exception:
         # Eksik sayfa, bozuk resim, kilitli dosya: kapak yüzünden kitap hiç üretilmesin olmaz.
@@ -949,6 +978,19 @@ def selftest():
     assert cover_dpi(72 * 11) == 153                # 11 inçlik sayfa: 1680/11
     assert cover_dpi(72 * 4) == SCAN_DPI            # 4 inçlik sayfa: hedef 420 dpi, tavan 300
     assert cover_dpi(0) == DPI                      # bozuk ölçü: güvenli varsayılan
+    # Kapak kaynağın üstüne çıkmaz: sayfa tek bir bitmap ise sınır o resmin kendi yoğunluğudur.
+    assert cover_dpi(72 * 8, 40) == 40              # kaynak 40 dpi: hedefe şişirmek boşuna bayt
+    assert cover_dpi(72 * 8, 600) == 210            # kaynak zengin: sınır hedefi değiştirmez
+    assert cover_dpi(72 * 8, 0.4) == 1              # çok küçük kaynak: en az 1 dpi
+    assert cover_dpi(72 * 8, None) == 210           # kaynak bilinmiyor: sınır yok
+    # Sayfanın kendi yoğunluğu: en keskin resim kazanır, metin/vektör varsa sınır konmaz.
+    assert bitmap_dpi([(600, 800, 288, 384)], False) == 150.0            # 600 px / 4 inç
+    assert bitmap_dpi([(300, 400, 288, 384)], False) == 75.0             # yarı çözünürlük
+    assert bitmap_dpi([(768, 1212, 256, 404), (384, 606, 256, 404)], False) == 216.0   # en keskin
+    assert bitmap_dpi([(600, 800, 400, 384)], False) == 150.0            # gergin resim: yüksek yön
+    assert bitmap_dpi([(600, 800, 288, 384)], True) is None              # metin/vektör: sınır yok
+    assert bitmap_dpi([], False) is None                                 # resim yok: sınır yok
+    assert bitmap_dpi([(600, 800, 0, 384)], False) is None               # bozuk kutu: yok sayılır
     # TOC: chapters.txt yalnız seçilmiş başlıkları bırakır, sayfadaki öteki "# " blokları paragrafa iner
     C = parse_chapters("0005 I. Bölüm\n0007 II. Bölüm\n0010 I. Bölüm\n0010 II. Bölüm\nbozuk satır\n")
     assert C == {"0005": ["I. Bölüm"], "0007": ["II. Bölüm"], "0010": ["I. Bölüm", "II. Bölüm"]}
