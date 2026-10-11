@@ -1,0 +1,5 @@
+*.pdf
+*.epub
+*.pdf2epub/
+__pycache__/
+.agents/skills/pdf2epub/tessdata/
